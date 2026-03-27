@@ -52,7 +52,7 @@ class MarkdownNormalizer:
     def _convert_chinese_number_in_heading(self, text: str) -> str:
         patterns = [
             (r'^([一二三四五六七八九十]+)[、．.]\s*', lambda m: self._replace_chinese_num(m)),
-            (r'^\(([一二三四五六七八九十]+)\)\s*', lambda m: f"({self._replace_chinese_num(m)}) "),
+            (r'^\(([一二三四五六七八九十]+)\)\s*', lambda m: ''),
         ]
         
         for pattern, replacement in patterns:
@@ -64,8 +64,8 @@ class MarkdownNormalizer:
                     if pattern == patterns[0][0]:
                         new_text = re.sub(pattern, f'{arabic_num}. ', text)
                     else:
-                        new_text = re.sub(pattern, f'({arabic_num}) ', text)
-                    self._log_fix(f"Converted Chinese number in heading: '{chinese_num}' -> '{arabic_num}'")
+                        new_text = re.sub(pattern, '', text)
+                    self._log_fix(f"Removed Chinese number in heading: '({chinese_num})'")
                     return new_text
         
         return text
@@ -303,24 +303,32 @@ class MarkdownNormalizer:
                 result.append(line)
                 continue
             
-            bullet_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
-            if bullet_match and bullet_match.group(2).strip():
+            bullet_match = re.match(r'^(\s*)[-*+](\s*)(.*)$', line)
+            if bullet_match and bullet_match.group(3).strip():
                 indent = bullet_match.group(1)
-                text = bullet_match.group(2).strip()
+                space = bullet_match.group(2)
+                text = bullet_match.group(3).strip()
                 normalized = indent + '- ' + text
                 if normalized != line:
-                    self._log_fix(f"Normalized bullet list: '{line.strip()}'")
+                    if not space:
+                        self._log_fix(f"Added missing space in bullet list: '{line.strip()}'")
+                    else:
+                        self._log_fix(f"Normalized bullet list: '{line.strip()}'")
                 result.append(normalized)
                 continue
             
-            ordered_match = re.match(r'^(\s*)(\d+)[.)]\s+(.+)$', line)
-            if ordered_match and ordered_match.group(3).strip():
+            ordered_match = re.match(r'^(\s*)(\d+)[.)](\s*)(.*)$', line)
+            if ordered_match and ordered_match.group(4).strip():
                 indent = ordered_match.group(1)
                 number = ordered_match.group(2)
-                text = ordered_match.group(3).strip()
+                space = ordered_match.group(3)
+                text = ordered_match.group(4).strip()
                 normalized = f"{indent}{number}. {text}"
                 if normalized != line:
-                    self._log_fix(f"Normalized ordered list: '{line.strip()}'")
+                    if not space:
+                        self._log_fix(f"Added missing space in ordered list: '{line.strip()}'")
+                    else:
+                        self._log_fix(f"Normalized ordered list: '{line.strip()}'")
                 result.append(normalized)
                 continue
             
@@ -333,7 +341,7 @@ class MarkdownNormalizer:
         
         for line in lines:
             stripped = line.strip()
-            if re.match(r'^[-_]{2,}$', stripped) and stripped != '---':
+            if re.match(r'^[-_*]{2,}$', stripped) and stripped != '---':
                 result.append('---')
                 self._log_fix(f"Normalized horizontal rule: '{stripped}' -> '---'")
             else:
@@ -458,15 +466,45 @@ class MarkdownNormalizer:
         lines = content.split('\n')
         fixed_lines = []
         trailing_count = 0
+        br_converted = 0
+        i = 0
         
-        for line in lines:
-            stripped = line.rstrip()
-            if stripped != line:
-                trailing_count += 1
-            fixed_lines.append(stripped)
+        while i < len(lines):
+            line = lines[i]
+            
+            if line.endswith('  ') or line.endswith('\t'):
+                stripped = line.rstrip()
+                merged_line = stripped
+                
+                while i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    if next_line.strip() == '':
+                        break
+                    if next_line.endswith('  ') or next_line.endswith('\t'):
+                        merged_line += '<br>' + next_line.rstrip()
+                        br_converted += 1
+                        i += 1
+                    else:
+                        merged_line += '<br>' + next_line.rstrip()
+                        br_converted += 1
+                        i += 1
+                        break
+                
+                fixed_lines.append(merged_line)
+                br_converted += 1
+            else:
+                stripped = line.rstrip()
+                if stripped != line:
+                    trailing_count += 1
+                fixed_lines.append(stripped)
+            
+            i += 1
         
         if trailing_count > 0:
             self._log_fix(f"Removed trailing whitespace from {trailing_count} lines")
+        
+        if br_converted > 0:
+            self._log_fix(f"Converted {br_converted} Markdown line breaks to <br>")
         
         return '\n'.join(fixed_lines)
     

@@ -68,6 +68,7 @@ class MarkdownParser:
         self.in_code_block = False
         self.code_content = []
         self.code_language = ''
+        self.code_block_indent = ''
         self.skip_empty = False
         self.enable_code_blocks = enable_code_blocks
         self.md_file_path = md_file_path
@@ -76,7 +77,7 @@ class MarkdownParser:
     def _parse_image(self, line: str) -> List[Dict[str, Any]]:
         """解析包含图片的行，返回元素列表"""
         elements = []
-        img_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        img_pattern = r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)'
         last_end = 0
         
         for match in re.finditer(img_pattern, line):
@@ -87,6 +88,7 @@ class MarkdownParser:
             
             alt_text = match.group(1)
             img_path = match.group(2)
+            img_title = match.group(3) if match.group(3) else ''
             
             if self.md_file_dir and not os.path.isabs(img_path) and not img_path.startswith('http'):
                 img_path = os.path.join(self.md_file_dir, img_path)
@@ -94,7 +96,8 @@ class MarkdownParser:
             elements.append({
                 'type': 'image',
                 'alt': alt_text,
-                'path': img_path
+                'path': img_path,
+                'title': img_title
             })
             last_end = match.end()
         
@@ -112,7 +115,8 @@ class MarkdownParser:
         while i < len(lines):
             line = lines[i]
             
-            if self.enable_code_blocks and line.startswith('```'):
+            stripped_line = line.lstrip()
+            if self.enable_code_blocks and stripped_line.startswith('```'):
                 if self.in_code_block:
                     self.elements.append({
                         'type': 'code_block',
@@ -121,16 +125,23 @@ class MarkdownParser:
                     })
                     self.code_content = []
                     self.code_language = ''
+                    self.code_block_indent = ''
                     self.in_code_block = False
                 else:
                     self.in_code_block = True
-                    self.code_language = line[3:].strip()
+                    self.code_language = stripped_line[3:].strip()
+                    self.code_block_indent = line[:len(line) - len(stripped_line)]
                 i += 1
                 self.skip_empty = False
                 continue
             
             if self.in_code_block:
-                self.code_content.append(line)
+                if self.code_block_indent and line.startswith(self.code_block_indent):
+                    self.code_content.append(line[len(self.code_block_indent):])
+                elif line.strip() == '':
+                    self.code_content.append('')
+                else:
+                    self.code_content.append(line)
                 i += 1
                 self.skip_empty = False
                 continue
@@ -211,7 +222,7 @@ class MarkdownParser:
     def _parse_cell_content(self, cell_text: str) -> List[Dict[str, Any]]:
         """解析单元格内容，支持文本和图片混合"""
         content = []
-        img_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        img_pattern = r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)'
         last_end = 0
         
         for match in re.finditer(img_pattern, cell_text):
@@ -222,6 +233,7 @@ class MarkdownParser:
             
             alt_text = match.group(1)
             img_path = match.group(2)
+            img_title = match.group(3) if match.group(3) else ''
             
             if self.md_file_dir and not os.path.isabs(img_path) and not img_path.startswith('http'):
                 img_path = os.path.join(self.md_file_dir, img_path)
@@ -229,7 +241,8 @@ class MarkdownParser:
             content.append({
                 'type': 'image',
                 'alt': alt_text,
-                'path': img_path
+                'path': img_path,
+                'title': img_title
             })
             last_end = match.end()
         
@@ -268,31 +281,83 @@ class TextFormatter:
                 else:
                     parts.append({'type': 'text', 'content': text[i]})
                     i += 1
-            elif text[i:i+2] == '**':
-                if i + 4 < len(text) and text[i+2:i+4] == '**':
+            elif text[i] == '[':
+                link_match = re.match(r'\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)', text[i:])
+                if link_match:
+                    link_text = link_match.group(1)
+                    link_url = link_match.group(2)
+                    link_title = link_match.group(3) if link_match.group(3) else ''
+                    inner_parts = TextFormatter.parse_inline(link_text)
+                    parts.append({'type': 'link', 'content': inner_parts, 'url': link_url, 'title': link_title})
+                    i += len(link_match.group(0))
+                else:
+                    parts.append({'type': 'text', 'content': text[i]})
+                    i += 1
+            elif text[i:i+3] == '***':
+                end_idx = text.find('***', i + 3)
+                if end_idx != -1:
+                    inner_content = text[i+3:end_idx]
+                    inner_parts = TextFormatter.parse_inline(inner_content)
+                    parts.append({'type': 'bold_italic', 'content': inner_parts})
+                    i = end_idx + 3
+                else:
+                    parts.append({'type': 'text', 'content': text[i:i+3]})
+                    i += 3
+            elif text[i:i+2] == '~~':
+                end_idx = text.find('~~', i + 2)
+                if end_idx != -1:
+                    inner_content = text[i+2:end_idx]
+                    inner_parts = TextFormatter.parse_inline(inner_content)
+                    parts.append({'type': 'strikethrough', 'content': inner_parts})
+                    i = end_idx + 2
+                else:
                     parts.append({'type': 'text', 'content': text[i:i+2]})
                     i += 2
+            elif text[i:i+2] == '**':
+                end_idx = text.find('**', i + 2)
+                if end_idx != -1:
+                    inner_content = text[i+2:end_idx]
+                    inner_parts = TextFormatter.parse_inline(inner_content)
+                    parts.append({'type': 'bold', 'content': inner_parts})
+                    i = end_idx + 2
                 else:
-                    end_idx = text.find('**', i + 2)
-                    if end_idx != -1:
-                        parts.append({'type': 'bold', 'content': text[i+2:end_idx]})
-                        i = end_idx + 2
-                    else:
-                        parts.append({'type': 'text', 'content': text[i:i+2]})
-                        i += 2
+                    parts.append({'type': 'text', 'content': text[i:i+2]})
+                    i += 2
+            elif text[i] == '*' and (i == 0 or text[i-1] != '*'):
+                end_idx = text.find('*', i + 1)
+                if end_idx != -1 and text[end_idx-1] != '*':
+                    inner_content = text[i+1:end_idx]
+                    inner_parts = TextFormatter.parse_inline(inner_content)
+                    parts.append({'type': 'italic', 'content': inner_parts})
+                    i = end_idx + 1
+                else:
+                    parts.append({'type': 'text', 'content': text[i]})
+                    i += 1
             elif text[i:i+4] == '<br>':
                 parts.append({'type': 'br'})
                 i += 4
             else:
                 next_code = text.find('`', i)
+                next_link = text.find('[', i)
+                next_bold_italic = text.find('***', i)
+                next_strikethrough = text.find('~~', i)
                 next_bold = text.find('**', i)
+                next_italic = text.find('*', i)
                 next_br = text.find('<br>', i)
                 
                 candidates = []
                 if next_code != -1:
                     candidates.append(('code', next_code))
+                if next_link != -1:
+                    candidates.append(('link', next_link))
+                if next_bold_italic != -1:
+                    candidates.append(('bold_italic', next_bold_italic))
+                if next_strikethrough != -1:
+                    candidates.append(('strikethrough', next_strikethrough))
                 if next_bold != -1:
                     candidates.append(('bold', next_bold))
+                if next_italic != -1:
+                    candidates.append(('italic', next_italic))
                 if next_br != -1:
                     candidates.append(('br', next_br))
                 
@@ -308,6 +373,17 @@ class TextFormatter:
                 i = next_pos
         
         return parts
+
+    @staticmethod
+    def parse_link(text: str) -> Optional[Dict[str, Any]]:
+        match = re.match(r'\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)', text)
+        if match:
+            return {
+                'text': match.group(1),
+                'url': match.group(2),
+                'title': match.group(3) if match.group(3) else ''
+            }
+        return None
 
 
 class DocxGenerator:
@@ -367,8 +443,40 @@ class DocxGenerator:
                 run = paragraph.add_run(part['content'])
                 self._set_run_font(run, size=base_size)
             elif part['type'] == 'bold':
-                run = paragraph.add_run(part['content'])
-                self._set_run_font(run, size=base_size, bold=True)
+                content = part['content']
+                if isinstance(content, list):
+                    for sub_part in content:
+                        self._render_part(paragraph, sub_part, base_size, bold=True)
+                else:
+                    run = paragraph.add_run(content)
+                    self._set_run_font(run, size=base_size, bold=True)
+            elif part['type'] == 'italic':
+                content = part['content']
+                if isinstance(content, list):
+                    for sub_part in content:
+                        self._render_part(paragraph, sub_part, base_size, italic=True)
+                else:
+                    run = paragraph.add_run(content)
+                    self._set_run_font(run, size=base_size)
+                    run.italic = True
+            elif part['type'] == 'bold_italic':
+                content = part['content']
+                if isinstance(content, list):
+                    for sub_part in content:
+                        self._render_part(paragraph, sub_part, base_size, bold=True, italic=True)
+                else:
+                    run = paragraph.add_run(content)
+                    self._set_run_font(run, size=base_size, bold=True)
+                    run.italic = True
+            elif part['type'] == 'strikethrough':
+                content = part['content']
+                if isinstance(content, list):
+                    for sub_part in content:
+                        self._render_part(paragraph, sub_part, base_size, strike=True)
+                else:
+                    run = paragraph.add_run(content)
+                    self._set_run_font(run, size=base_size)
+                    run.font.strike = True
             elif part['type'] == 'code':
                 run = paragraph.add_run(part['content'])
                 run.font.size = Pt(base_size)
@@ -377,8 +485,122 @@ class DocxGenerator:
                 shading = OxmlElement('w:shd')
                 shading.set(qn('w:fill'), 'F0F0F0')
                 run._r.get_or_add_rPr().append(shading)
+            elif part['type'] == 'link':
+                link_url = part.get('url', '')
+                link_content = part.get('content', [])
+                link_text = self._extract_text_from_parts(link_content)
+                if link_text:
+                    self._add_hyperlink(paragraph, link_url, link_text, base_size)
             elif part['type'] == 'br':
                 paragraph.add_run().add_break()
+    
+    def _render_part(self, paragraph, part: Dict[str, Any], base_size: float = 12, bold: bool = False, italic: bool = False, strike: bool = False):
+        if part['type'] == 'text':
+            run = paragraph.add_run(part['content'])
+            self._set_run_font(run, size=base_size, bold=bold, italic=italic, strike=strike)
+        elif part['type'] == 'bold':
+            content = part['content']
+            if isinstance(content, list):
+                for sub_part in content:
+                    self._render_part(paragraph, sub_part, base_size, bold=True, italic=italic, strike=strike)
+            else:
+                run = paragraph.add_run(content)
+                self._set_run_font(run, size=base_size, bold=True)
+                if italic:
+                    run.italic = True
+                if strike:
+                    run.font.strike = True
+        elif part['type'] == 'italic':
+            content = part['content']
+            if isinstance(content, list):
+                for sub_part in content:
+                    self._render_part(paragraph, sub_part, base_size, bold=bold, italic=True, strike=strike)
+            else:
+                run = paragraph.add_run(content)
+                self._set_run_font(run, size=base_size)
+                run.italic = True
+                if bold:
+                    run.bold = True
+                if strike:
+                    run.font.strike = True
+        elif part['type'] == 'code':
+            run = paragraph.add_run(part['content'])
+            run.font.size = Pt(base_size)
+            run.font.name = 'Consolas'
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Consolas')
+            shading = OxmlElement('w:shd')
+            shading.set(qn('w:fill'), 'F0F0F0')
+            run._r.get_or_add_rPr().append(shading)
+            if bold:
+                run.bold = True
+            if italic:
+                run.italic = True
+        elif part['type'] == 'link':
+            link_url = part.get('url', '')
+            link_content = part.get('content', [])
+            link_text = self._extract_text_from_parts(link_content)
+            if link_text:
+                self._add_hyperlink(paragraph, link_url, link_text, base_size)
+    
+    def _set_run_font(self, run, font_cn: str = '宋体', font_en: str = 'Times New Roman', size: float = 12, bold: bool = False, italic: bool = False, strike: bool = False):
+        run.font.size = Pt(size)
+        run.font.name = font_en
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), font_cn)
+        run.bold = bold
+        if italic:
+            run.italic = True
+        if strike:
+            run.font.strike = True
+    
+    def _add_hyperlink(self, paragraph, url: str, text: str, base_size: float = 12):
+        part = paragraph.part
+        r_id = part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True)
+        
+        hyperlink = OxmlElement('w:hyperlink')
+        hyperlink.set(qn('r:id'), r_id)
+        
+        new_run = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        
+        rFonts = OxmlElement('w:rFonts')
+        rFonts.set(qn('w:ascii'), 'Times New Roman')
+        rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+        rFonts.set(qn('w:eastAsia'), '宋体')
+        rPr.append(rFonts)
+        
+        sz = OxmlElement('w:sz')
+        sz.set(qn('w:val'), str(int(base_size * 2)))
+        rPr.append(sz)
+        
+        color = OxmlElement('w:color')
+        color.set(qn('w:val'), '0563C1')
+        rPr.append(color)
+        
+        u = OxmlElement('w:u')
+        u.set(qn('w:val'), 'single')
+        rPr.append(u)
+        
+        new_run.append(rPr)
+        
+        text_elem = OxmlElement('w:t')
+        text_elem.text = text
+        new_run.append(text_elem)
+        
+        hyperlink.append(new_run)
+        paragraph._p.append(hyperlink)
+    
+    def _extract_text_from_parts(self, parts: List[Dict[str, Any]]) -> str:
+        text_parts = []
+        for part in parts:
+            if part.get('type') == 'text':
+                text_parts.append(part.get('content', ''))
+            elif part.get('type') in ('bold', 'italic', 'bold_italic', 'strikethrough', 'code'):
+                content = part.get('content')
+                if isinstance(content, list):
+                    text_parts.append(self._extract_text_from_parts(content))
+                elif isinstance(content, str):
+                    text_parts.append(content)
+        return ''.join(text_parts)
     
     def add_cover_page(self, title: str, version: str = '', date: str = ''):
         for _ in range(3):
@@ -471,6 +693,13 @@ class DocxGenerator:
     def add_paragraph(self, text: str):
         p = self.doc.add_paragraph()
         p.paragraph_format.first_line_indent = Cm(0.74)
+        p.paragraph_format.line_spacing = 1.5
+        self._add_formatted_text(p, text)
+    
+    def add_paragraph_with_hanging_indent(self, text: str):
+        p = self.doc.add_paragraph()
+        p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.left_indent = Cm(0.74)
         p.paragraph_format.line_spacing = 1.5
         self._add_formatted_text(p, text)
     
@@ -629,9 +858,7 @@ class DocxGenerator:
         border.append(left_border)
         p._p.get_or_add_pPr().append(border)
         
-        run = p.add_run(text)
-        self._set_run_font(run, size=12)
-        run.italic = True
+        self._add_formatted_text(p, text)
     
     def add_horizontal_rule(self):
         p = self.doc.add_paragraph()
@@ -729,7 +956,10 @@ class DocxGenerator:
                 self.add_heading(5, elem['text'])
             
             elif elem['type'] == 'paragraph':
-                self.add_paragraph(elem['text'])
+                if '<br>' in elem['text']:
+                    self.add_paragraph_with_hanging_indent(elem['text'])
+                else:
+                    self.add_paragraph(elem['text'])
             
             elif elem['type'] == 'bullet':
                 self.add_bullet(elem['text'], elem.get('level', 1))
